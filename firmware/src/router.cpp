@@ -41,16 +41,24 @@ static uint8_t msp_tx_buffer[256];
 static uint8_t serial_tx_buffer[256];
 
 typedef struct {
-    bool valid;
+    uint16_t freq;
     uint8_t addr[6];
+    bool valid;
 } peer_info_t;
 static peer_info_t peers[16];
 
+static String mac_addr_print(uint8_t const * const mac_addr)
+{
+    char macStr[18] = {0};
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4],
+            mac_addr[5]);
+    return String(macStr);
+}
 
-static void add_peer(uint8_t const * const mac_addr, uint32_t const channel, uint8_t const node_id)
+static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uint8_t const node_id)
 {
     if (ARRAY_SIZE(peers) <= node_id)
-        return;
+        return false;
 #if DEBUG_PRINT
     Serial.printf("add_peer(mac: %02X,%02X,%02X,%02X,%02X,%02X , channel:%u, node_id:%u)\r\n",
         mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
@@ -71,10 +79,11 @@ static void add_peer(uint8_t const * const mac_addr, uint32_t const channel, uin
 #endif
     {
         // Error
-        return;
+        return false;
     }
     peers[node_id].valid = true;
     memcpy(peers[node_id].addr, mac_addr, 6);
+    return true;
 }
 
 static void reset_peers(void)
@@ -120,25 +129,75 @@ static void reset_peers(void)
     memset(peers, 0, sizeof(peers));
 }
 
+int8_t find_peer_index(uint8_t const * const addr)
+{
+    uint8_t iter;
+    for (iter = 0; iter < ARRAY_SIZE(peers); iter++) {
+        if (peers[iter].valid && memcmp(peers[iter].addr, addr, 6) == 0) {
+            return iter;
+        }
+    }
+    return -1;
+}
+
+static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const node_index, uint16_t const freq, uint8_t const type)
+{
+#if DEBUG_PRINT
+    Serial.printf("register(mac: %02X,%02X,%02X,%02X,%02X,%02X , freq:%u, node_id:%u)\r\n",
+        addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
+        freq, node_index);
+#endif
+    laptimer_register_resp_t command = {
+        .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = node_index};
+    size_t const size = MSP::bufferPacket(
+        msp_tx_buffer, (mspPacketType_e)type, MSP_LAP_TIMER, 0, sizeof(command), (uint8_t *)&command);
+    if (size)
+        esp_now_send((uint8_t*)addr, msp_tx_buffer, size);
+}
+
 static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const data_len)
 {
     static MSP esp_now_msp_rx;
     uint8_t iter;
-    //bool const peer_exists = esp_now_is_peer_exist(mac_addr);
 
     if (!data_len)
         return;
+
+    Serial.print("ESPNOW RX ");
+    Serial.print(mac_addr_print(mac_addr));
 
     esp_now_msp_rx.markPacketFree();
 
     for (iter = 0; iter < data_len; iter++) {
         if (esp_now_msp_rx.processReceivedByte(data[iter])) {
             //  MSP received, check content
-            //mspPacket_t & packet = esp_now_msp_rx.getPacket();
-
+            mspPacket_t & packet = esp_now_msp_rx.getPacket();
+            if (packet.function == MSP_LAP_TIMER) {
+                laptimer_messages_t const * const p_msg = (laptimer_messages_t *)packet.payload;
+                Serial.print(" !! - Laptimer message: ");
+                if (p_msg->subcommand == CMD_LAP_TIMER_REGISTER) {
+                    Serial.print("LAP_TIMER_REGISTER");
+                    if (packet.type == MSP_PACKET_V2_COMMAND) {
+                        // Check if the client is on on current heat and send resp
+                        int8_t const node_index = find_peer_index(mac_addr);
+                        if (0 <= node_index) {
+                            espnow_laptimer_register_send(
+                                mac_addr, node_index, peers[node_index].freq, MSP_PACKET_V2_RESPONSE);
+                        }
+                        Serial.print(" - registeration OK");
+                    } else {
+                        Serial.print("MSP_RESP -> IGNORE!");
+                    }
+                } else {
+                    Serial.print("Unsupported subcommand: ");
+                    Serial.print(p_msg->subcommand);
+                }
+            }
             esp_now_msp_rx.markPacketFree();
         }
     }
+
+    Serial.println();
 }
 
 static void esp_now_send_cb(
@@ -174,21 +233,6 @@ static void espnow_send_msp(mspPacket_t & msp, uint8_t const node_id)
         }
 #endif
     }
-}
-
-static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const node_index, uint16_t const freq, uint8_t const type)
-{
-#if DEBUG_PRINT
-    Serial.printf("register(mac: %02X,%02X,%02X,%02X,%02X,%02X , freq:%u, node_id:%u)\r\n",
-        addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
-        freq, node_index);
-#endif
-    laptimer_register_resp_t command = {
-        .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = node_index};
-    size_t const size = MSP::bufferPacket(
-        msp_tx_buffer, (mspPacketType_e)type, MSP_LAP_TIMER, 0, sizeof(command), (uint8_t *)&command);
-    if (size)
-        esp_now_send((uint8_t*)addr, msp_tx_buffer, size);
 }
 
 void setup()
@@ -272,12 +316,14 @@ void loop()
                             break;
                         }
                         case SUBCMD_ROUTER_ADD: {
-                            add_peer(p_msg->peer_add.mac, WIFI_CHANNEL, p_msg->peer_add.node_id);
-                            espnow_laptimer_register_send(
-                                p_msg->peer_add.mac,
-                                p_msg->peer_add.node_id,
-                                p_msg->peer_add.freq,
-                                msp_in.type);
+                            if (add_peer(p_msg->peer_add.mac, WIFI_CHANNEL, p_msg->peer_add.node_id)) {
+                                espnow_laptimer_register_send(
+                                    p_msg->peer_add.mac,
+                                    p_msg->peer_add.node_id,
+                                    p_msg->peer_add.freq,
+                                    msp_in.type);
+                                peers[p_msg->peer_add.node_id].freq = p_msg->peer_add.freq;
+                            }
                             break;
                         }
                         case SUBCMD_ROUTER_PING: {
