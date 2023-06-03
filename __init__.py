@@ -3,7 +3,7 @@ import logging
 import serial
 import serial.tools.list_ports
 import time
-from struct import pack
+from struct import pack, unpack
 from VRxControl import VRxController, VRxDevice, VRxDeviceMethod
 import Config
 import threading
@@ -36,7 +36,7 @@ def _loge(err: str):
     logger.error(f"ESP-NOW ERROR: {err}")
 
 def _handle_serial(ser):
-    _logi("== SERIAL READ ==")
+    _logd("== SERIAL READ ==")
     while True:
         try:
             reading = ser.readline().decode()
@@ -84,15 +84,18 @@ class EspnowController(VRxController):
                     self.ser.write(ping)
                     self.ser.flush()
                     msp = EspNowCommands.msp_receive(self.ser, 2)
-                    if msp and msp.get_cmd() == EspNowCommands.SUBCMD_ROUTER_PING:
-                        _logi(f"ping resp: {[hex(x) for x in msp.get_msg()]}")
-                        _logi(f"Module Found at {p.device}")
-                        self.ready = True
+                    if msp and msp.func == EspNowCommands.FUNC_ROUTER:
+                        ping_payload = msp.get_msg()
+                        if EspNowCommands.get_subcommand(ping_payload) == EspNowCommands.SUBCMD_ROUTER_PING:
+                            # _logi(f"ping resp: {[hex(x) for x in ping_payload]}")
+                            _logi(f"Module Found at {p.device}")
+                            _logi(f"Module MAC address {':'.join([hex(x) for x in ping_payload[4:]])}")
+                            self.ready = True
 
-                        thread = threading.Thread(target=_handle_serial, args=(self.ser,))
-                        thread.daemon = True
-                        thread.start()
-                        return
+                            thread = threading.Thread(target=_handle_serial, args=(self.ser,))
+                            thread.daemon = True
+                            thread.start()
+                            return
                 except serial.serialutil.SerialException:
                     pass
 
@@ -120,7 +123,7 @@ class EspnowController(VRxController):
         This function is called when new heat is selected.
         Send pilots info to ESP-NOW sender and prepare ESP-NOW peers.
         """
-        logger.info(f"onHeatSet: _args {_args}")
+        # logger.info(f"onHeatSet: _args {_args}")
         if not self.ready:
             return
         # Remove all existing peers
@@ -145,7 +148,7 @@ class EspnowController(VRxController):
                 address = rhdata.get_pilot_attribute_value(pilot_id, 'mac')
                 round_num = rhdata.get_max_round(current_heat) or 0
                 if address:
-                    _logi(f"  ! {pilot.callsign}, addr: {address}, "
+                    _logd(f"  ! {pilot.callsign}, addr: {address}, "
                           f"heat: {current_heat}, round: {round_num}, freq: {freq}")
                     # Add peer
                     msg = EspNowCommands.msg_router_peer_add(address, seat_id, current_heat, freq)
@@ -153,9 +156,11 @@ class EspnowController(VRxController):
                     self.pilots_in_heat.append(pilot)
 
     def onRaceStage(self, _args):
-        logger.info(f"onRaceStage: _args {_args} ... ARM NOW (race is about to start)")
+        # logger.info(f"onRaceStage: _args {_args} ... ARM NOW (race is about to start)")
         if not self.ready:
             return
+        self._sendRaceStart()
+        '''
         # Debug stuff:
         seat_pilots = self.racecontext.race.node_pilots
         rhdata = self.racecontext.rhdata
@@ -168,33 +173,27 @@ class EspnowController(VRxController):
                 address = rhdata.get_pilot_attribute_value(pilot_id, 'mac')
                 if address:
                     _logi(f"  ! {pilot.callsign}, addr: {address}")
+        '''
 
     def onRaceStart(self, _args):
-        logger.info(f"onRaceStart: _args {_args} ... RACE ON")
+        # logger.info(f"onRaceStart: _args {_args} ... RACE ON")
         if not self.ready:
             return
-        current_heat = self.racecontext.race.current_heat
-        msg = EspNowCommands.msg_start(current_heat, 0xff)
-        self._sendMessage(msg)
+        self._sendRaceStart()
 
     def onRaceFinish(self, _args):
-        logger.info(f"onRaceFinish: _args {_args}")
+        # logger.info(f"onRaceFinish: _args {_args}")
         if not self.ready:
             return
-        current_heat = self.racecontext.race.current_heat
-        msg = EspNowCommands.msg_stop(current_heat, 0xff)
-        self._sendMessage(msg)
+        self._sendRaceStop()
 
     def onRaceStop(self, _args):
-        logger.info(f"onRaceStop: _args {_args}")
+        # logger.info(f"onRaceStop: _args {_args}")
         if not self.ready:
             return
-        current_heat = self.racecontext.race.current_heat
-        msg = EspNowCommands.msg_stop(current_heat, 0xff)
-        self._sendMessage(msg)
 
     def onRaceLapRecorded(self, args):
-        logger.info(f"onRaceLapRecorded: _args {args}")
+        # logger.info(f"onRaceLapRecorded: _args {args}")
         if not self.ready:
             return
         if 'node_index' not in args:
@@ -209,8 +208,7 @@ class EspnowController(VRxController):
         lap_time_ms = int(lap['lap_time'] + 0.5)
         # round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
 
-        _logi(f"LAP! node {node_index}, lap {lap_number}, time {lap_time_ms}")
-        _logi(f"LAP! node {type(node_index)}, lap {type(lap_number)}, time {type(lap_time_ms)}")
+        # _logd(f"LAP! node {node_index}, lap {lap_number}, time {lap_time_ms}")
 
         msg = EspNowCommands.msg_laptime(lap_time_ms, lap_number, current_heat, node_index)
         self._sendMessage(msg)
@@ -227,14 +225,24 @@ class EspnowController(VRxController):
         """
 
     def onLapsClear(self, _args):
-        logger.info(f"onLapsClear: _args {_args}")
+        # logger.info(f"onLapsClear: _args {_args}")
         if not self.ready:
             return
 
     def onSendMessage(self, args):
-        logger.info(f"onSendMessage: _args {args}")
+        # logger.info(f"onSendMessage: _args {args}")
         if not self.ready:
             return
+
+    def _sendRaceStart(self):
+        current_heat = self.racecontext.race.current_heat
+        msg = EspNowCommands.msg_start(current_heat, 0xff)
+        self._sendMessage(msg)
+
+    def _sendRaceStop(self):
+        current_heat = self.racecontext.race.current_heat
+        msg = EspNowCommands.msg_stop(current_heat, 0xff)
+        self._sendMessage(msg)
 
     def _sendMessage(self, payload):
         try:
@@ -278,6 +286,10 @@ class EspNowCommands:
             crc = MSP.calc_crc(x, crc)
         # MSPv2 COMMAND
         return pack(f"<B B B {len(message)}s B", ord('$'), ord('X'), ord(['>', '<'][command]), message, crc)
+
+    @classmethod
+    def get_subcommand(cls, data):
+        return unpack("<I", bytes(data[:4]))[0]
 
     @classmethod
     def msg_start(cls, race_id: int, node_id: int):
@@ -402,7 +414,6 @@ class MSP:
 
         self.resp = False  # False = COMMAND, True = RESP
         self.func = None
-        self.subcommand = None
         self.flags = None
 
     @staticmethod
@@ -443,8 +454,6 @@ class MSP:
             self._crc = MSP.calc_crc(byte, self._crc)
             if self._len <= len(self._msg):
                 self._state = "crc"
-            elif 1 == len(self._msg):
-                self.subcommand = byte
             return False
         if _state == "crc":
             if self.func not in [EspNowCommands.FUNC_LAP_TIMER, EspNowCommands.FUNC_ROUTER]:
@@ -453,8 +462,8 @@ class MSP:
                 return True
         raise MSP.MspError(f"Parsing failed in state: {self._state}")
 
-    def get_cmd(self):
-        return self.subcommand
+    def isOngoing(self) -> bool:
+        return self._ongoing
 
     def get_msg(self):
         return self._msg
