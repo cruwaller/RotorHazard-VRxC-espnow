@@ -8,7 +8,7 @@
 #include <espnow.h>
 #endif
 
-//#define DEBUG_PRINT 0
+//#define DEBUG_PRINT 1
 
 #define SERIAL_BAUD 921600
 #define SERIAL_INVERTED false
@@ -60,9 +60,9 @@ static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uin
     if (ARRAY_SIZE(peers) <= node_id && node_id != 0xff)
         return false;
 #if DEBUG_PRINT
-    Serial.printf("add_peer(mac: %02X,%02X,%02X,%02X,%02X,%02X , channel:%u, node_id:%u)\r\n",
-        mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-        channel, node_id);
+    Serial.print("add_peer(mac: ");
+    Serial.print(mac_addr_print(mac_addr));
+    Serial.printf(", channel:%u, node_id:%u)\r\n", channel, node_id);
 #endif
 #ifdef ARDUINO_ARCH_ESP32
     esp_now_peer_info_t peer_info = {
@@ -85,6 +85,9 @@ static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uin
         // RD info
         rd_info.valid = true;
         memcpy(rd_info.addr, mac_addr, 6);
+#if DEBUG_PRINT
+        Serial.println("RD's MAC added");
+#endif
     } else {
         peers[node_id].valid = true;
         memcpy(peers[node_id].addr, mac_addr, 6);
@@ -96,35 +99,6 @@ static void reset_peers(void)
 {
 #if DEBUG_PRINT
     Serial.println("reset_peers()");
-#endif
-#if 0
-#ifdef ARDUINO_ARCH_ESP32
-    esp_now_peer_info_t peer_info = {
-        .peer_addr = {0},
-        .lmk = {0},
-        .channel = 0,
-        .ifidx = ESP_IF_WIFI_AP,
-        .encrypt = 0,
-        .priv = NULL
-    };
-    esp_now_peer_num_t count = {0};
-    if (ESP_OK == esp_now_get_peer_num(&count) && count.total_num) {
-#if DEBUG_PRINT
-        Serial.printf("  * remove peers (%u)... \r\n", count.total_num);
-#endif
-        for (uint8_t iter = 0; iter < count.total_num; iter++) {
-            if (esp_now_fetch_peer(iter == 0, &peer_info) == ESP_OK) {
-#if DEBUG_PRINT
-                Serial.printf("  del mac: %02X,%02X,%02X,%02X,%02X,%02X\r\n",
-                    peer_info.peer_addr[0], peer_info.peer_addr[1], peer_info.peer_addr[2],
-                    peer_info.peer_addr[3], peer_info.peer_addr[4], peer_info.peer_addr[5]);
-#endif
-                //esp_now_del_peer(peer_info.peer_addr);
-            }
-        }
-    }
-#else
-#endif
 #endif
     uint8_t iter;
     for (iter = 0; iter < ARRAY_SIZE(peers); iter++) {
@@ -154,9 +128,9 @@ bool rd_mac_validate(const uint8_t * mac_addr)
 static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const node_index, uint16_t const freq, uint8_t const type)
 {
 #if DEBUG_PRINT
-    Serial.printf("register(mac: %02X,%02X,%02X,%02X,%02X,%02X , freq:%u, node_id:%u)\r\n",
-        addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
-        freq, node_index);
+    Serial.print("Laptimer register cmd (mac: ");
+    Serial.print(mac_addr_print(addr));
+    Serial.printf(", freq:%u, node_id:%u)\r\n", freq, node_index);
 #endif
     laptimer_register_resp_t command = {
         .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = node_index};
@@ -228,8 +202,9 @@ static void esp_now_send_cb(
                            )
 {
 #if DEBUG_PRINT
-    Serial.printf("msg sent! mac: %02X,%02X,%02X,%02X,%02X,%02X , status:%s\r\n",
-        mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5], status ? "FAIL":"OK");
+    Serial.print("esp-now sent rdy! (mac: ");
+    Serial.print(mac_addr_print(mac_addr));
+    Serial.printf(", status:%s\r\n", status ? "FAIL":"OK");
 #endif
 }
 
@@ -245,8 +220,9 @@ static void espnow_send_msp(mspPacket_t & msp, uint8_t const node_id)
         esp_now_send(p_addr, msp_tx_buffer, len);
 #if DEBUG_PRINT
         if (p_addr) {
-            Serial.printf("espnow_send_msp() mac: %02X,%02X,%02X,%02X,%02X,%02X , node_id:%u\r\n",
-                          p_addr[0], p_addr[1], p_addr[2], p_addr[3], p_addr[4], p_addr[5], node_id);
+            Serial.print("espnow_send_msp() mac: ");
+            Serial.print(mac_addr_print(p_addr));
+            Serial.printf(", node_id:%u\r\n", node_id);
         } else {
             Serial.printf("espnow_send_msp() broadcasted\r\n");
         }

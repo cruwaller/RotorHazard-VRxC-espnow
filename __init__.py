@@ -180,9 +180,9 @@ class EspnowController(VRxController):
         if conn_baud:
             baud = conn_baud
         try:
-            baud = int(baud, 10)
-        except ValueError:
-            _loge(f"Unable to convert baudrate value '{conn_baud}' to integer")
+            baud = int(baud)
+        except (ValueError, TypeError):
+            _loge(f"Unable to convert baudrate value '{baud}' to integer")
             return
         port = self.config.get('espnow_port', None)
         # port = self.racecontext.rhdata.get_option('espnow_port', port)
@@ -478,7 +478,7 @@ class EspNowCommands:
         } esp_now_router_set_wifi_t;
         """
         if type(ssid) != bytes:
-            ssid = bytes(ssid)
+            ssid = bytes(ssid.encode())
         ssid = ssid[:32]  # Cut SSID to its max length
         channel = int(channel) % 15  # Max 14 channels and 0 is auto
         payload = pack(f"<I B {len(ssid)}s B", cls.SUBCMD_ROUTER_WIFI, channel, ssid, 0)
