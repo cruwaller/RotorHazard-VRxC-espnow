@@ -2,26 +2,33 @@
 import logging
 import serial
 import serial.tools.list_ports
-import time
 from struct import pack, unpack
 from VRxControl import VRxController, VRxDevice, VRxDeviceMethod
 import Config
 import threading
 
 logger = logging.getLogger(__name__)
+RHAPI = None
 
 
 def registerHandlers(args):
     if 'registerFn' in args:
-        args['registerFn'](EspnowController('espnow', 'ESPNOW'))
-
+        args['registerFn'](EspnowController('espnow', 'ESPNOW', RHAPI))
 
 def initialize(**kwargs):
     if 'Events' in kwargs:
         kwargs['Events'].on('VRxC_Initialize', 'VRx_register_espnow', registerHandlers, {}, 75)
     if 'RHAPI' in kwargs:
-        kwargs['RHAPI'].register_pilot_attribute("mac", "ESPNOW MAC Address", "text")
-
+        rhapi = kwargs['RHAPI']
+        rhapi.register_pilot_attribute("mac", "ESPNOW MAC Address", "text")
+        rhapi.register_ui_panel("ESPNOW", "ESPNOW Router Config", "settings")
+        rhapi.register_general_setting("espnow-ap-ssid", "AP SSID", "ESPNOW", "text")
+        rhapi.register_general_setting("espnow-ap-channel", "AP Channel", "ESPNOW", "text")
+        rhapi.register_general_setting("espnow-address", "Address", "ESPNOW", "text")
+        rhapi.register_general_setting("espnow-baud", "Baudrate", "ESPNOW", "text")
+        rhapi.register_general_setting("espnow-race-director-mac", "RD MAC", "ESPNOW", "text")
+        global RHAPI
+        RHAPI = rhapi
 
 def _logd(dbg: str):
     logger.debug(f"ESP-NOW: {dbg}")
@@ -35,86 +42,162 @@ def _logw(wrn: str):
 def _loge(err: str):
     logger.error(f"ESP-NOW ERROR: {err}")
 
-def _handle_serial(ser):
-    _logd("== SERIAL READ ==")
-    while True:
-        try:
-            reading = ser.readline().decode()
-            if (reading):
-                _logi(f"GOT: '{reading.strip()}'")
-        except UnicodeDecodeError:
-            pass
-        # time.sleep(1)
 
 class EspnowController(VRxController):
-    def __init__(self, name, label):
+    def __init__(self, name, label, api):
         self.ser = serial.Serial()
         self.ready = False
         self.config = {}
         self.seat_frequencies = [0] * 8
         self.current_heat = 0
         self.pilots_in_heat = []
+        self._rhapi = api
         super().__init__(name, label)
 
-    def _discoverPort(self):
-        # Find port for TBS comms device
-        port = self.config.get('espnow_port', None)
-        port = self.racecontext.rhdata.get_option('espnow_port', port)
+    def _handle_serial(self, ser: serial.Serial):
+        _logd("== SERIAL READ ==")
+        _msp_msg = MSP()
+        _log_str = ""
+        try:
+            while True:
+                _byte = ser.read(1)
+                if _byte:
+                    try:
+                        msp_received = _msp_msg.process(int.from_bytes(_byte, 'little'))
+                    except MSP.MspError as error:
+                        _loge(f"MSP parsing error {error}")
+                        continue
+                    if msp_received:
+                        # MSP message received...
+                        if _msp_msg.func == EspNowCommands.FUNC_LAP_TIMER:
+                            _payload = _msp_msg.get_msg()
+                            _command = EspNowCommands.get_subcommand(_payload)
+                            if _command == EspNowCommands.SUBCMD_LAP_TIMER_START:
+                                _logi("Laptimer start received!")
+                                if self._rhapi:
+                                    pass
+                            elif _command == EspNowCommands.SUBCMD_LAP_TIMER_STOP:
+                                _logi("Laptimer stop received!")
+                                if self._rhapi:
+                                    pass
+                            else:
+                                _logw(f"Laptimer command {_command} not handled!")
+                    elif not _msp_msg.ongoing():
+                        try:
+                            _log_str += _byte.decode()
+                            if '\n' in _log_str:
+                                _logi(f"ROUTER LOG: '{_log_str.strip()}'")
+                                _log_str = ""
+                        except UnicodeDecodeError:
+                            pass
+        except serial.serialutil.SerialException as error:
+            _loge(f"Serial connection exception: '{error}' -> exit loop")
+
+    def _test_port(self, port: str) -> bool:
         if port:
             self.ser.port = port
-            _logd(f"Using port {port}")
-            return
-        else:
-            # Automatic port discovery
-            _logd("Finding a serial port...")
+            return self._check_device()
+        return False
 
-            ping = EspNowCommands.msg_ping()
+    def _discoverPort(self):
+        # Automatic port discovery for ESP-NOW device
+        _logd("Finding a serial port...")
+        self.ser.timeout = 1
+        ports = list(serial.tools.list_ports.comports())
+        for p in ports:
+            try:
+                if self._test_port(p.device):
+                    return
+            except serial.serialutil.SerialException:
+                pass
+            _logd(f"No module at {p.device}")
+            self.ser.close()
+        _logw("No module discovered or configured")
 
-            ports = list(serial.tools.list_ports.comports())
-            self.ser.timeout = 1
+    def _create_device(self, name, state=False, mac=None):
+        device = VRxDevice()
+        device.id = name
+        device.name = name
+        device.type = "ESP-NOW"
+        device.connected = state
+        device.ready = state
+        if mac:
+            device.name = mac
+        device.map.method = VRxDeviceMethod.ALL
+        self.addDevice(device)
 
-            for p in ports:
-                response = None
-                try:
-                    _logd(f" Trying dev {p.device} baud: {self.ser.baudrate}")
-                    self.ser.port = p.device
-                    self.ser.open()
-                    # time.sleep(2)
-                    self.ser.reset_input_buffer()
-                    self.ser.write(ping)
-                    self.ser.flush()
-                    msp = EspNowCommands.msp_receive(self.ser, 2)
-                    if msp and msp.func == EspNowCommands.FUNC_ROUTER:
-                        ping_payload = msp.get_msg()
-                        if EspNowCommands.get_subcommand(ping_payload) == EspNowCommands.SUBCMD_ROUTER_PING:
-                            # _logi(f"ping resp: {[hex(x) for x in ping_payload]}")
-                            _logi(f"Module Found at {p.device}")
-                            _logi(f"Module MAC address {':'.join([hex(x) for x in ping_payload[4:]])}")
-                            self.ready = True
+    def _check_device(self) -> bool:
+        _logi(f" Trying dev {self.ser.port} baud: {self.ser.baudrate}")
+        ping = EspNowCommands.msg_ping()
+        try:
+            self.ser.open()
+            # time.sleep(2)
+            self.ser.reset_input_buffer()
+            self.ser.write(ping)
+            self.ser.flush()
+            msp = EspNowCommands.msp_receive(self.ser, 2)
+            if msp and msp.func == EspNowCommands.FUNC_ROUTER:
+                ping_payload = msp.get_msg()
+                if EspNowCommands.get_subcommand(ping_payload) == EspNowCommands.SUBCMD_ROUTER_PING:
+                    mac_addr = ':'.join([hex(x) for x in ping_payload[4:]])
+                    # _logi(f"ping resp: {[hex(x) for x in ping_payload]}")
+                    _logi(f"Module Found at {self.ser.port}")
+                    _logi(f"Module MAC address {mac_addr}")
+                    self.ready = True
 
-                            thread = threading.Thread(target=_handle_serial, args=(self.ser,))
-                            thread.daemon = True
-                            thread.start()
-                            return
-                except serial.serialutil.SerialException:
-                    pass
+                    self._create_device(self.ser.port, True, mac_addr)
 
-                _logd(f"No module at {p.device} (got resp {response})")
-
-                self.ser.close()
-
-            _logw("No module discovered or configured")
+                    thread = threading.Thread(target=self._handle_serial, args=(self.ser,))
+                    thread.daemon = True
+                    thread.start()
+                    return True
+        except serial.serialutil.SerialException:
+            pass
+        return False
 
     def onStartup(self, _args):
+        rhdata = self.racecontext.rhdata
+        ap_ssid = rhdata.get_option("espnow-ap-ssid", "")
+        ap_channel = rhdata.get_option("espnow-ap-channel", "")
+        conn_addr = rhdata.get_option("espnow-address", "")
+        conn_baud = rhdata.get_option("espnow-baud", "")
+        if not ap_ssid:
+            ap_ssid = "RotorHazard ESP-NOW Router"
+            rhdata.set_option("espnow-ap-ssid", ap_ssid)
+        if not ap_channel:
+            ap_channel = "6"
+            rhdata.set_option("espnow-ap-channel", ap_channel)
+        _logi(f"********* WIFI AP:'{ap_ssid}', CH:{ap_channel}")
+        _logi(f"********* SERIAL addr:{conn_addr}, baud:{conn_baud}")
+
         # Fetch config.json
         self.config = Config.VRX_CONTROL
         # Fetch used node freq
         self.seat_frequencies = [node.frequency for node in self.racecontext.interface.nodes]
 
         baud = self.config.get('espnow_baudrate', 921600)
-        baud = self.racecontext.rhdata.get_option('espnow_baudrate', baud)
+        # baud = self.racecontext.rhdata.get_option('espnow_baudrate', baud)
+        if conn_baud:
+            baud = conn_baud
+        try:
+            baud = int(baud, 10)
+        except ValueError:
+            _loge(f"Unable to convert baudrate value '{conn_baud}' to integer")
+            return
+        port = self.config.get('espnow_port', None)
+        # port = self.racecontext.rhdata.get_option('espnow_port', port)
+        if conn_addr:
+            port = conn_addr
         self.ser.baudrate = baud
-        self._discoverPort()
+        if not self._test_port(port):
+            self._discoverPort()
+        if self.ser.isOpen():
+            # Connection ok, setup AP
+            self._sendMessage(EspNowCommands.msg_router_set_ssid(ap_ssid, ap_channel))
+            rd_mac = rhdata.get_option("espnow-race-director-mac", "")
+            if rd_mac:
+                _logi(f"********* RD's MAC: {rd_mac}")
+                self._sendMessage(EspNowCommands.msg_router_set_rd(rd_mac))
         # Make sure the initially loaded heat is also taken into account
         self.onHeatSet({})
 
@@ -268,6 +351,8 @@ class EspNowCommands:
     SUBCMD_ROUTER_RESET = 0x00
     SUBCMD_ROUTER_ADD = 0x01
     SUBCMD_ROUTER_PING = 0x02
+    SUBCMD_ROUTER_WIFI = 0x03
+    SUBCMD_ROUTER_RD = 0x04
 
     FLAG_BROADCAST = 0x1
 
@@ -381,6 +466,45 @@ class EspNowCommands:
         payload = pack("<I H H H 6s", cls.SUBCMD_ROUTER_ADD, node_id, race_id, freq, mac)
         return cls._generate_msp(cls.fill_header(cls.FUNC_ROUTER, payload))
 
+    @classmethod
+    def msg_router_set_ssid(cls, ssid: str, channel: str):
+        """
+        typedef struct {
+            uint32_t subcommand;
+            uint8_t channel;
+            uint8_t ssid[1];
+        } esp_now_router_set_wifi_t;
+        """
+        if type(ssid) != bytes:
+            ssid = bytes(ssid)
+        ssid = ssid[:32]  # Cut SSID to its max length
+        channel = int(channel) % 15  # Max 14 channels and 0 is auto
+        payload = pack(f"<I B {len(ssid)}s B", cls.SUBCMD_ROUTER_WIFI, channel, ssid, 0)
+        return cls._generate_msp(cls.fill_header(cls.FUNC_ROUTER, payload))
+
+    @classmethod
+    def msg_router_set_rd(cls, mac: str):
+        """
+        typedef struct {
+            uint32_t subcommand;
+            uint8_t mac[6];
+        } esp_now_router_set_rd_t;
+        """
+        mac = mac.strip()
+        if ',' in mac:
+            _mac = mac.split(',')
+            mac = 0
+            for val in _mac:
+                mac <<= 8
+                mac += int(val, 10)
+        elif ":" in mac:
+            mac = int(mac.replace(':', '')[:12], 16)
+        else:
+            mac = int(mac[:12], 16)
+        mac = mac.to_bytes(6, 'big')
+        payload = pack("<I 6s", cls.SUBCMD_ROUTER_RD, mac)
+        return cls._generate_msp(cls.fill_header(cls.FUNC_ROUTER, payload))
+
     @staticmethod
     def msp_receive(ser: serial.Serial, timeout: int = 2):
         msp_msg = MSP()
@@ -430,17 +554,32 @@ class MSP:
                 crc = crc << 1
         return crc & 0xFF
 
+    def ongoing(self):
+        return self._ongoing
+
+    def reset(self):
+        self._ongoing = False
+        self._state = "type"
+
     def process(self, byte):
         if not self._ongoing:
             self._ongoing = byte == ord('$')
             return False
         _state = self._state
-        if _state == "type" and byte == ord('X'):  # Only MSPv2
+        if _state == "type":
+            if byte != ord('X'):  # Only MSPv2
+                self.reset()
+                raise self.MspError("Not MSPv2")
             self._state = "cmd"
             return False
-        if _state == "cmd" and byte in [ord('<'), ord('>')]:
+        if _state == "cmd":
+            if byte not in [ord('<'), ord('>')]:
+                self.reset()
+                raise self.MspError("Invalid MSP message type")
             self.resp = byte == ord('>')
             self._state = "hdr"
+            self._crc = 0
+            self._msg = []
             return False
         if _state == "hdr":
             self._msg.append(byte)
@@ -460,10 +599,13 @@ class MSP:
                 self._state = "crc"
             return False
         if _state == "crc":
+            self.reset()
             if self.func not in [EspNowCommands.FUNC_LAP_TIMER, EspNowCommands.FUNC_ROUTER]:
                 raise self.MspError("Not a lap timer message")
-            if byte == self._crc:
-                return True
+            if byte != self._crc:
+                raise self.MspError("CRC mismatch")
+            return True
+        self.reset()
         raise MSP.MspError(f"Parsing failed in state: {self._state}")
 
     def isOngoing(self) -> bool:

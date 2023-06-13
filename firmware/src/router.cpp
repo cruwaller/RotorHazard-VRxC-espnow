@@ -13,9 +13,7 @@
 #define SERIAL_BAUD 921600
 #define SERIAL_INVERTED false
 
-#define WIFI_AP_SSID    "RotorHazard ESP-NOW Router"
 #define WIFI_AP_PSK     "ShouldNotConnectToThis"
-#define WIFI_CHANNEL    6
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 
@@ -35,6 +33,7 @@
 #define LED_SET(STATE)
 #endif
 
+static uint8_t wifi_channel;
 
 static MSP msp_handler;
 static uint8_t msp_tx_buffer[256];
@@ -46,6 +45,7 @@ typedef struct {
     bool valid;
 } peer_info_t;
 static peer_info_t peers[16];
+static peer_info_t rd_info;
 
 static String mac_addr_print(uint8_t const * const mac_addr)
 {
@@ -57,7 +57,7 @@ static String mac_addr_print(uint8_t const * const mac_addr)
 
 static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uint8_t const node_id)
 {
-    if (ARRAY_SIZE(peers) <= node_id)
+    if (ARRAY_SIZE(peers) <= node_id && node_id != 0xff)
         return false;
 #if DEBUG_PRINT
     Serial.printf("add_peer(mac: %02X,%02X,%02X,%02X,%02X,%02X , channel:%u, node_id:%u)\r\n",
@@ -81,8 +81,14 @@ static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uin
         // Error
         return false;
     }
-    peers[node_id].valid = true;
-    memcpy(peers[node_id].addr, mac_addr, 6);
+    if (node_id == 0xff) {
+        // RD info
+        rd_info.valid = true;
+        memcpy(rd_info.addr, mac_addr, 6);
+    } else {
+        peers[node_id].valid = true;
+        memcpy(peers[node_id].addr, mac_addr, 6);
+    }
     return true;
 }
 
@@ -140,6 +146,11 @@ int8_t find_peer_index(uint8_t const * const addr)
     return -1;
 }
 
+bool rd_mac_validate(const uint8_t * mac_addr)
+{
+    return (rd_info.valid && memcmp(rd_info.addr, mac_addr, 6) == 0);
+}
+
 static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const node_index, uint16_t const freq, uint8_t const type)
 {
 #if DEBUG_PRINT
@@ -158,13 +169,14 @@ static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const n
 static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const data_len)
 {
     static MSP esp_now_msp_rx;
+    String log;
     uint8_t iter;
 
     if (!data_len)
         return;
 
-    Serial.print("ESPNOW RX ");
-    Serial.print(mac_addr_print(mac_addr));
+    log = "ESPNOW RX ";
+    log += mac_addr_print(mac_addr);
 
     esp_now_msp_rx.markPacketFree();
 
@@ -174,9 +186,9 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
             mspPacket_t & packet = esp_now_msp_rx.getPacket();
             if (packet.function == MSP_LAP_TIMER) {
                 laptimer_messages_t const * const p_msg = (laptimer_messages_t *)packet.payload;
-                Serial.print(" !! - Laptimer message: ");
+                log += " !! - Laptimer message: ";
                 if (p_msg->subcommand == CMD_LAP_TIMER_REGISTER) {
-                    Serial.print("LAP_TIMER_REGISTER");
+                    log += "LAP_TIMER_REGISTER";
                     if (packet.type == MSP_PACKET_V2_COMMAND) {
                         // Check if the client is on on current heat and send resp
                         int8_t const node_index = find_peer_index(mac_addr);
@@ -184,20 +196,27 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
                             espnow_laptimer_register_send(
                                 mac_addr, node_index, peers[node_index].freq, MSP_PACKET_V2_RESPONSE);
                         }
-                        Serial.print(" - registeration OK");
+                        log += " - registeration OK";
                     } else {
-                        Serial.print("MSP_RESP -> IGNORE!");
+                        log += "MSP_RESP -> IGNORE!";
+                    }
+                } else if (p_msg->subcommand == CMD_LAP_TIMER_START || p_msg->subcommand == CMD_LAP_TIMER_STOP) {
+                    if (packet.type == MSP_PACKET_V2_COMMAND && rd_mac_validate(mac_addr)) {
+                        size_t const len = MSP::bufferPacket(serial_tx_buffer, &packet);
+                        if (len) {
+                            Serial.write(serial_tx_buffer, len);
+                        }
                     }
                 } else {
-                    Serial.print("Unsupported subcommand: ");
-                    Serial.print(p_msg->subcommand);
+                    log += "Unsupported subcommand: ";
+                    log += p_msg->subcommand;
                 }
             }
             esp_now_msp_rx.markPacketFree();
         }
     }
 
-    Serial.println();
+    Serial.println(log);
 }
 
 static void esp_now_send_cb(
@@ -235,24 +254,13 @@ static void espnow_send_msp(mspPacket_t & msp, uint8_t const node_id)
     }
 }
 
-void setup()
+void wifi_ap_config(const char * ssid, uint8_t const channel)
 {
+    static bool wifi_setup_done = false;
+
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
-
-    LED_INIT();
-    LED_SET(false);
-
-    msp_handler.markPacketFree();
-
-    Serial.setRxBufferSize(512);
-#ifdef ARDUINO_ARCH_ESP32
-    Serial.begin(SERIAL_BAUD, SERIAL_8N1, -1, -1, SERIAL_INVERTED);
-#else
-    Serial.begin(SERIAL_BAUD, SERIAL_8N1, SERIAL_FULL, 1, SERIAL_INVERTED);
-#endif
-    delay(500);
 
     WiFi.disconnect(true);
 #ifdef ARDUINO_ARCH_ESP32
@@ -262,7 +270,15 @@ void setup()
 #endif
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(local_IP, gateway, subnet);
-    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PSK, WIFI_CHANNEL);
+    WiFi.softAP(ssid, WIFI_AP_PSK, channel);
+
+    wifi_channel = channel;
+
+    if (wifi_setup_done) {
+        // No need to reinit the ESP-NOW, just remove all peers
+        reset_peers();
+        return;
+    }
 
     if (esp_now_init() != 0) {
         bool led = false;
@@ -279,10 +295,24 @@ void setup()
     esp_now_register_send_cb(esp_now_send_cb);
     esp_now_register_recv_cb((esp_now_recv_cb_t)esp_now_recv_cb);
 
-    // TODO: setup wifi AP
-
+    wifi_setup_done = true;
 }
 
+void setup()
+{
+    LED_INIT();
+    LED_SET(false);
+
+    msp_handler.markPacketFree();
+
+    Serial.setRxBufferSize(512);
+#ifdef ARDUINO_ARCH_ESP32
+    Serial.begin(SERIAL_BAUD, SERIAL_8N1, -1, -1, SERIAL_INVERTED);
+#else
+    Serial.begin(SERIAL_BAUD, SERIAL_8N1, SERIAL_FULL, 1, SERIAL_INVERTED);
+#endif
+    delay(100);
+}
 
 void loop()
 {
@@ -316,7 +346,7 @@ void loop()
                             break;
                         }
                         case SUBCMD_ROUTER_ADD: {
-                            if (add_peer(p_msg->peer_add.mac, WIFI_CHANNEL, p_msg->peer_add.node_id)) {
+                            if (add_peer(p_msg->peer_add.mac, wifi_channel, p_msg->peer_add.node_id)) {
                                 espnow_laptimer_register_send(
                                     p_msg->peer_add.mac,
                                     p_msg->peer_add.node_id,
@@ -330,14 +360,26 @@ void loop()
                             msp_in.payloadSize = sizeof(p_msg->subcommand) + 6;
                             uint8_t * p_mac = &msp_in.payload[sizeof(p_msg->subcommand)];
                             // Get MAC address
-                            //esp_wifi_get_mac((wifi_interface_t)WIFI_IF_AP, p_mac);
                             WiFi.softAPmacAddress(p_mac);
-                            //WiFi.macAddress(p_mac);
                             size_t const len = MSP::bufferPacket(serial_tx_buffer, &msp_in);
                             if (len) {
                                 Serial.write(serial_tx_buffer, len);
                                 Serial.flush();
                             }
+                            // TODO: reset the device?
+                            break;
+                        }
+                        case SUBCMD_ROUTER_WIFI: {
+                            wifi_ap_config((char*)p_msg->set_wifi.ssid, p_msg->set_wifi.channel);
+                            break;
+                        }
+                        case SUBCMD_ROUTER_RD: {
+                            if (rd_info.valid) {
+                                // Remove existing one
+                                esp_now_del_peer(rd_info.addr);
+                                rd_info.valid = false;
+                            }
+                            add_peer(p_msg->set_rd.mac, wifi_channel, 0xff);
                             break;
                         }
                     };

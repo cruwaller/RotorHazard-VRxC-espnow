@@ -78,6 +78,8 @@ enum {
     SUBCMD_ROUTER_RESET = 0x00,
     SUBCMD_ROUTER_ADD = 0x01,
     SUBCMD_ROUTER_PING = 0x02,
+    SUBCMD_ROUTER_WIFI = 0x03,
+    SUBCMD_ROUTER_RD = 0x04,
 };
 
 typedef struct {
@@ -96,11 +98,24 @@ typedef struct {
     uint8_t mac[6];
 } esp_now_router_peer_add_t;
 
+typedef struct {
+    uint32_t subcommand;
+    uint8_t channel;
+    uint8_t ssid[1];
+} esp_now_router_set_wifi_t;
+
+typedef struct {
+    uint32_t subcommand;
+    uint8_t mac[6];
+} esp_now_router_set_rd_t;
+
 typedef union {
     uint32_t subcommand;
     esp_now_router_ping_t ping;
     esp_now_router_reset_t reset;
     esp_now_router_peer_add_t peer_add;
+    esp_now_router_set_wifi_t set_wifi;
+    esp_now_router_set_rd_t set_rd;
 } esp_now_router_messages_t;
 
 /************************** LAPTIMER Commands ***************************/
