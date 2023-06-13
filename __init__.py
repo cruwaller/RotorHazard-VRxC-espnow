@@ -236,12 +236,14 @@ class EspnowController(VRxController):
 
     def _sendRaceStart(self):
         current_heat = self.racecontext.race.current_heat
-        msg = EspNowCommands.msg_start(current_heat, 0xff)
+        round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
+        msg = EspNowCommands.msg_start(current_heat, 0xff, round_num)
         self._sendMessage(msg)
 
     def _sendRaceStop(self):
         current_heat = self.racecontext.race.current_heat
-        msg = EspNowCommands.msg_stop(current_heat, 0xff)
+        round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
+        msg = EspNowCommands.msg_stop(current_heat, 0xff, round_num)
         self._sendMessage(msg)
 
     def _sendMessage(self, payload):
@@ -292,27 +294,29 @@ class EspNowCommands:
         return unpack("<I", bytes(data[:4]))[0]
 
     @classmethod
-    def msg_start(cls, race_id: int, node_id: int):
+    def msg_start(cls, race_id: int, node_id: int, round_id: int = 0):
         """
         typedef struct {
             uint32_t subcommand;
             uint16_t node_index;
             uint16_t race_id;
+            uint16_t round_id;
         } laptimer_start_t;
         """
-        payload = pack("<I H H", cls.SUBCMD_LAP_TIMER_START, node_id, race_id)
+        payload = pack("<I H H H", cls.SUBCMD_LAP_TIMER_START, node_id, race_id, round_id)
         return cls._generate_msp(cls.fill_header(cls.FUNC_LAP_TIMER, payload, cls.FLAG_BROADCAST))
 
     @classmethod
-    def msg_stop(cls, race_id: int, node_id: int):
+    def msg_stop(cls, race_id: int, node_id: int, round_id: int = 0):
         """
         typedef struct {
             uint32_t subcommand;
             uint16_t node_index;
             uint16_t race_id;
+            uint16_t round_id;
         } laptimer_stop_t;
         """
-        payload = pack("<I H H", cls.SUBCMD_LAP_TIMER_STOP, node_id, race_id)
+        payload = pack("<I H H H", cls.SUBCMD_LAP_TIMER_STOP, node_id, race_id, round_id)
         return cls._generate_msp(cls.fill_header(cls.FUNC_LAP_TIMER, payload, cls.FLAG_BROADCAST))
 
     @classmethod

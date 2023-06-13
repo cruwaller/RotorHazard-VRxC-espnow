@@ -134,12 +134,14 @@ typedef struct {
     uint32_t subcommand;
     uint16_t node_index;
     uint16_t race_id;
+    uint16_t round_id;
 } PACKED laptimer_start_t;
 
 typedef struct {
     uint32_t subcommand;
     uint16_t node_index;
     uint16_t race_id;
+    uint16_t round_id;
 } PACKED laptimer_stop_t;
 
 typedef struct {
