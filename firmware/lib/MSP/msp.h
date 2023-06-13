@@ -164,6 +164,7 @@ typedef struct {
     uint32_t lap_time_ms;
     uint16_t node_index;
     uint16_t race_id;
+    uint16_t round_id;
     uint8_t lap_index;
 } PACKED laptimer_lap_t;
 

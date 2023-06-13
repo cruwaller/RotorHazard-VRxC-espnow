@@ -284,6 +284,7 @@ class EspnowController(VRxController):
             return False
 
         current_heat = self.racecontext.race.current_heat
+        round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
 
         node_index = args['node_index']
         lap = args['lap']
@@ -293,7 +294,7 @@ class EspnowController(VRxController):
 
         # _logd(f"LAP! node {node_index}, lap {lap_number}, time {lap_time_ms}")
 
-        msg = EspNowCommands.msg_laptime(lap_time_ms, lap_number, current_heat, node_index)
+        msg = EspNowCommands.msg_laptime(lap_time_ms, lap_number, current_heat, node_index, round_num)
         self._sendMessage(msg)
         """
         # Get relevant results
@@ -405,17 +406,18 @@ class EspNowCommands:
         return cls._generate_msp(cls.fill_header(cls.FUNC_LAP_TIMER, payload, cls.FLAG_BROADCAST))
 
     @classmethod
-    def msg_laptime(cls, laptime_ms: int, lap_idx: int, race_id: int, node_id: int):
+    def msg_laptime(cls, laptime_ms: int, lap_idx: int, race_id: int, node_id: int, round_id: int = 0):
         """
         typedef struct {
             uint32_t subcommand;
             uint32_t lap_time_ms;
             uint16_t node_index;
             uint16_t race_id;
+            uint16_t round_id;
             uint8_t lap_index;
         } laptimer_lap_t;
         """
-        payload = pack("<I I H H B", cls.SUBCMD_LAP_TIMER_LAP, laptime_ms, node_id, race_id, lap_idx)
+        payload = pack("<I I H H H B", cls.SUBCMD_LAP_TIMER_LAP, laptime_ms, node_id, race_id, round_id, lap_idx)
         return cls._generate_msp(cls.fill_header(cls.FUNC_LAP_TIMER, payload))
 
     @classmethod
