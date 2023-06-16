@@ -34,6 +34,7 @@
 #endif
 
 static uint8_t wifi_channel;
+static uint8_t my_mac_address[6];
 
 static MSP msp_handler;
 static uint8_t msp_tx_buffer[256];
@@ -140,6 +141,13 @@ static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const n
         esp_now_send((uint8_t*)addr, msp_tx_buffer, size);
 }
 
+typedef struct {
+    uint32_t subcommand;
+    uint8_t mac_addr[6];
+    char pilot[33];
+} laptimer_register_ntf_t;  // Send to python
+
+
 static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const data_len)
 {
     static MSP esp_now_msp_rx;
@@ -169,8 +177,20 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
                         if (0 <= node_index) {
                             espnow_laptimer_register_send(
                                 mac_addr, node_index, peers[node_index].freq, MSP_PACKET_V2_RESPONSE);
+                            log += " - registeration OK";
+                        } else {
+                            // pilot not configured yet, send info to RH
+                            laptimer_register_ntf_t info;
+                            info.subcommand = CMD_LAP_TIMER_REGISTER;
+                            memcpy(info.mac_addr, mac_addr, sizeof(info.mac_addr));
+                            memcpy(info.pilot, p_msg->register_req.pilot, sizeof(info.pilot));
+                            size_t const len = MSP::bufferPacket(
+                                serial_tx_buffer, MSP_PACKET_V2_COMMAND, MSP_LAP_TIMER, 0,
+                                sizeof(info), (uint8_t *)&info);
+                            if (len) {
+                                Serial.write(serial_tx_buffer, len);
+                            }
                         }
-                        log += " - registeration OK";
                     } else {
                         log += "MSP_RESP -> IGNORE!";
                     }
@@ -288,6 +308,12 @@ void setup()
     Serial.begin(SERIAL_BAUD, SERIAL_8N1, SERIAL_FULL, 1, SERIAL_INVERTED);
 #endif
     delay(100);
+
+    // Read AP MAC address
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAPmacAddress(my_mac_address);
+    WiFi.mode(WIFI_OFF);
 }
 
 void loop()
@@ -335,8 +361,8 @@ void loop()
                         case SUBCMD_ROUTER_PING: {
                             msp_in.payloadSize = sizeof(p_msg->subcommand) + 6;
                             uint8_t * p_mac = &msp_in.payload[sizeof(p_msg->subcommand)];
-                            // Get MAC address
-                            WiFi.softAPmacAddress(p_mac);
+                            // Set MAC address
+                            memcpy(p_mac, my_mac_address, sizeof(my_mac_address));
                             size_t const len = MSP::bufferPacket(serial_tx_buffer, &msp_in);
                             if (len) {
                                 Serial.write(serial_tx_buffer, len);

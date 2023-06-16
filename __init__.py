@@ -13,6 +13,7 @@ RHAPI = None
 
 def registerHandlers(args):
     if 'registerFn' in args:
+        global RHAPI
         args['registerFn'](EspnowController('espnow', 'ESPNOW', RHAPI))
 
 def initialize(**kwargs):
@@ -72,6 +73,7 @@ class EspnowController(VRxController):
                         if _msp_msg.func == EspNowCommands.FUNC_LAP_TIMER:
                             _payload = _msp_msg.get_msg()
                             _command = EspNowCommands.get_subcommand(_payload)
+                            _payload = _payload[4:]
                             if _command == EspNowCommands.SUBCMD_LAP_TIMER_START:
                                 _logi("Laptimer start received!")
                                 if self._rhapi:
@@ -80,6 +82,21 @@ class EspnowController(VRxController):
                                 _logi("Laptimer stop received!")
                                 if self._rhapi:
                                     pass
+                            elif _command == EspNowCommands.SUBCMD_LAP_TIMER_REGISTER:
+                                mac_addr = ':'.join(['%02X' % x for x in _payload[:6]])
+                                _payload = _payload[6:-1]
+                                callsign = "".join([chr(x) for x in _payload[:_payload.index(0)]])
+                                _logi(f"Laptimer register! Pilot: '{callsign}', address: {mac_addr}")
+                                all_pilots = self.racecontext.rhdata.get_pilots()
+                                for _pilot in all_pilots:
+                                    if callsign in [_pilot.callsign, _pilot.name]:
+                                        alter_pilot = {
+                                            "pilot_id": _pilot.id,
+                                            "pilot_attr": "mac",
+                                            "value": mac_addr,
+                                        }
+                                        self.racecontext.rhdata.alter_pilot(alter_pilot)
+                                        break
                             else:
                                 _logw(f"Laptimer command {_command} not handled!")
                     elif not _msp_msg.ongoing():
