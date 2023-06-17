@@ -77,11 +77,11 @@ class EspnowController(VRxController):
                             if _command == EspNowCommands.SUBCMD_LAP_TIMER_START:
                                 _logi("Laptimer start received!")
                                 if self._rhapi:
-                                    pass
+                                    self._rhapi.race_stage()
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_STOP:
                                 _logi("Laptimer stop received!")
                                 if self._rhapi:
-                                    pass
+                                    self._rhapi.race_stop()
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_REGISTER:
                                 mac_addr = ':'.join(['%02X' % x for x in _payload[:6]])
                                 _payload = _payload[6:-1]
@@ -291,6 +291,7 @@ class EspnowController(VRxController):
         # logger.info(f"onRaceStop: _args {_args}")
         if not self.ready:
             return
+        self._sendRaceStop()
 
     def onRaceLapRecorded(self, args):
         # logger.info(f"onRaceLapRecorded: _args {args}")

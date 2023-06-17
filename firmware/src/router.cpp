@@ -134,7 +134,7 @@ static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const n
     Serial.printf(", freq:%u, node_id:%u)\r\n", freq, node_index);
 #endif
     laptimer_register_resp_t command = {
-        .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = node_index};
+        .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = (node_index + 1)};
     size_t const size = MSP::bufferPacket(
         msp_tx_buffer, (mspPacketType_e)type, MSP_LAP_TIMER, 0, sizeof(command), (uint8_t *)&command);
     if (size)
