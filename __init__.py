@@ -81,7 +81,9 @@ class EspnowController(VRxController):
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_STOP:
                                 _logi("Laptimer stop received!")
                                 if self._rhapi:
-                                    self._rhapi.race_stop()
+                                    # TODO: save or not?
+                                    # self._rhapi.race_stop(doSave=True)
+                                    self._rhapi.race_stop(doSave=False)
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_REGISTER:
                                 mac_addr = ':'.join(['%02X' % x for x in _payload[:6]])
                                 _payload = _payload[6:-1]
@@ -310,9 +312,9 @@ class EspnowController(VRxController):
         lap_time_ms = int(lap['lap_time'] + 0.5)
         # round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
 
-        # _logd(f"LAP! node {node_index}, lap {lap_number}, time {lap_time_ms}")
+        _logd(f"LAP! node {node_index}, lap {lap_number}, time {lap_time_ms}")
 
-        msg = EspNowCommands.msg_laptime(lap_time_ms, lap_number, current_heat, node_index, round_num)
+        msg = EspNowCommands.msg_laptime(lap_time_ms, lap_number, current_heat, (node_index + 1), round_num)
         self._sendMessage(msg)
         """
         # Get relevant results

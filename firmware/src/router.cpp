@@ -48,7 +48,7 @@ typedef struct {
 static peer_info_t peers[16];
 static peer_info_t rd_info;
 
-static String mac_addr_print(uint8_t const * const mac_addr)
+String mac_addr_print(uint8_t const * const mac_addr)
 {
     char macStr[18] = {0};
     sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4],
@@ -56,31 +56,39 @@ static String mac_addr_print(uint8_t const * const mac_addr)
     return String(macStr);
 }
 
+bool rd_mac_validate(const uint8_t * mac_addr)
+{
+    return (rd_info.valid && memcmp(rd_info.addr, mac_addr, 6) == 0);
+}
+
 static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uint8_t const node_id)
 {
     if (ARRAY_SIZE(peers) <= node_id && node_id != 0xff)
         return false;
+    bool const peer_exists = esp_now_is_peer_exist(mac_addr);
 #if DEBUG_PRINT
     Serial.print("add_peer(mac: ");
     Serial.print(mac_addr_print(mac_addr));
     Serial.printf(", channel:%u, node_id:%u)\r\n", channel, node_id);
 #endif
+    if (!peer_exists) {
 #ifdef ARDUINO_ARCH_ESP32
-    esp_now_peer_info_t peer_info = {
-        .peer_addr = {0},
-        .lmk = {0},
-        .channel = (uint8_t)channel,
-        .ifidx = ESP_IF_WIFI_AP,
-        .encrypt = false,
-        .priv = NULL};
-    memcpy(peer_info.peer_addr, mac_addr, sizeof(peer_info.peer_addr));
-    if (esp_now_add_peer(&peer_info) != ESP_OK)
+        esp_now_peer_info_t peer_info = {
+            .peer_addr = {0},
+            .lmk = {0},
+            .channel = (uint8_t)channel,
+            .ifidx = ESP_IF_WIFI_AP,
+            .encrypt = false,
+            .priv = NULL};
+        memcpy(peer_info.peer_addr, mac_addr, sizeof(peer_info.peer_addr));
+        if (esp_now_add_peer(&peer_info) != ESP_OK)
 #else
-    if (esp_now_add_peer((u8 *)mac_addr, ESP_NOW_ROLE_COMBO, channel, NULL, 0) != 0)
+        if (esp_now_add_peer((u8 *)mac_addr, ESP_NOW_ROLE_COMBO, channel, NULL, 0) != 0)
 #endif
-    {
-        // Error
-        return false;
+        {
+            // Error
+            return false;
+        }
     }
     if (node_id == 0xff) {
         // RD info
@@ -104,7 +112,8 @@ static void reset_peers(void)
     uint8_t iter;
     for (iter = 0; iter < ARRAY_SIZE(peers); iter++) {
         if (peers[iter].valid) {
-            esp_now_del_peer(peers[iter].addr);
+            if (!rd_mac_validate(peers[iter].addr))
+                esp_now_del_peer(peers[iter].addr);
         }
     }
     memset(peers, 0, sizeof(peers));
@@ -121,11 +130,6 @@ int8_t find_peer_index(uint8_t const * const addr)
     return -1;
 }
 
-bool rd_mac_validate(const uint8_t * mac_addr)
-{
-    return (rd_info.valid && memcmp(rd_info.addr, mac_addr, 6) == 0);
-}
-
 static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const node_index, uint16_t const freq, uint8_t const type)
 {
 #if DEBUG_PRINT
@@ -134,7 +138,7 @@ static void espnow_laptimer_register_send(uint8_t const * addr, uint16_t const n
     Serial.printf(", freq:%u, node_id:%u)\r\n", freq, node_index);
 #endif
     laptimer_register_resp_t command = {
-        .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = (node_index + 1)};
+        .subcommand = CMD_LAP_TIMER_REGISTER, .freq = freq, .node_index = (uint16_t)(node_index + 1)};
     size_t const size = MSP::bufferPacket(
         msp_tx_buffer, (mspPacketType_e)type, MSP_LAP_TIMER, 0, sizeof(command), (uint8_t *)&command);
     if (size)
@@ -151,14 +155,11 @@ typedef struct {
 static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const data_len)
 {
     static MSP esp_now_msp_rx;
-    String log;
+    String log = "";
     uint8_t iter;
 
     if (!data_len)
         return;
-
-    log = "ESPNOW RX ";
-    log += mac_addr_print(mac_addr);
 
     esp_now_msp_rx.markPacketFree();
 
@@ -168,7 +169,7 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
             mspPacket_t & packet = esp_now_msp_rx.getPacket();
             if (packet.function == MSP_LAP_TIMER) {
                 laptimer_messages_t const * const p_msg = (laptimer_messages_t *)packet.payload;
-                log += " !! - Laptimer message: ";
+                //log += " !! - Laptimer message: ";
                 if (p_msg->subcommand == CMD_LAP_TIMER_REGISTER) {
                     log += "LAP_TIMER_REGISTER";
                     if (packet.type == MSP_PACKET_V2_COMMAND) {
@@ -192,7 +193,7 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
                             }
                         }
                     } else {
-                        log += "MSP_RESP -> IGNORE!";
+                        log += "MSP_LAP_TIMER - MSPv2_RESP -> IGNORE!";
                     }
                 } else if (p_msg->subcommand == CMD_LAP_TIMER_START || p_msg->subcommand == CMD_LAP_TIMER_STOP) {
                     if (packet.type == MSP_PACKET_V2_COMMAND && rd_mac_validate(mac_addr)) {
@@ -202,7 +203,7 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
                         }
                     }
                 } else {
-                    log += "Unsupported subcommand: ";
+                    log += "MSP_LAP_TIMER - Unsupported subcommand: ";
                     log += p_msg->subcommand;
                 }
             }
@@ -210,7 +211,8 @@ static void esp_now_recv_cb(uint8_t * mac_addr, uint8_t * data, uint8_t const da
         }
     }
 
-    Serial.println(log);
+    if (log.length())
+        Serial.println(log);
 }
 
 static void esp_now_send_cb(
