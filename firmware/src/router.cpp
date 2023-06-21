@@ -117,6 +117,12 @@ static void reset_peers(void)
         }
     }
     memset(peers, 0, sizeof(peers));
+    if (rd_info.valid && !esp_now_is_peer_exist(rd_info.addr)) {
+#if DEBUG_PRINT
+        Serial.println("RD is missing... add again");
+#endif
+        add_peer(rd_info.addr, wifi_channel, 0xff);
+    }
 }
 
 int8_t find_peer_index(uint8_t const * const addr)
@@ -378,6 +384,9 @@ void loop()
                             break;
                         }
                         case SUBCMD_ROUTER_RD: {
+#if DEBUG_PRINT
+                            Serial.println("SUBCMD_ROUTER_RD...");
+#endif
                             if (rd_info.valid) {
                                 // Remove existing one
                                 esp_now_del_peer(rd_info.addr);
