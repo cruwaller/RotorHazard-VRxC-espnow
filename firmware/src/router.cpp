@@ -65,7 +65,7 @@ static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uin
 {
     if (ARRAY_SIZE(peers) <= node_id && node_id != 0xff)
         return false;
-    bool const peer_exists = esp_now_is_peer_exist(mac_addr);
+    bool const peer_exists = esp_now_is_peer_exist((uint8_t*)mac_addr);
 #if DEBUG_PRINT
     Serial.print("add_peer(mac: ");
     Serial.print(mac_addr_print(mac_addr));
