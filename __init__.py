@@ -4,32 +4,35 @@ import serial
 import serial.tools.list_ports
 from struct import pack, unpack
 from VRxControl import VRxController, VRxDevice, VRxDeviceMethod
+from RHUI import UIField, UIFieldType
 import Config
 import threading
+from eventmanager import Evt
 
 logger = logging.getLogger(__name__)
 RHAPI = None
 
 
-def registerHandlers(args):
-    if 'registerFn' in args:
-        global RHAPI
-        args['registerFn'](EspnowController('espnow', 'ESPNOW', RHAPI))
+def register_handlers(args):
+    global RHAPI
+    args['register_fn'](EspnowController('espnow', 'ESPNOW', RHAPI))
 
-def initialize(**kwargs):
-    if 'Events' in kwargs:
-        kwargs['Events'].on('VRxC_Initialize', 'VRx_register_espnow', registerHandlers, {}, 75)
-    if 'RHAPI' in kwargs:
-        rhapi = kwargs['RHAPI']
-        rhapi.register_pilot_attribute("mac", "ESPNOW MAC Address", "text")
-        rhapi.register_ui_panel("ESPNOW", "ESPNOW Router Config", "settings")
-        rhapi.register_general_setting("espnow-ap-ssid", "AP SSID", "ESPNOW", "text")
-        rhapi.register_general_setting("espnow-ap-channel", "AP Channel", "ESPNOW", "text")
-        rhapi.register_general_setting("espnow-address", "Address", "ESPNOW", "text")
-        rhapi.register_general_setting("espnow-baud", "Baudrate", "ESPNOW", "text")
-        rhapi.register_general_setting("espnow-race-director-mac", "RD MAC", "ESPNOW", "text")
-        global RHAPI
-        RHAPI = rhapi
+def initialize(rhapi):
+    rhapi.fields.register_pilot_attribute(UIField("mac", "ESPNOW MAC Address", UIFieldType.TEXT))
+    rhapi.ui.register_panel("ESPNOW", "ESPNOW Router Config", "settings")
+    rhapi.fields.register_option(
+        UIField("espnow-ap-ssid", "AP SSID", UIFieldType.TEXT), "ESPNOW")
+    rhapi.fields.register_option(
+        UIField("espnow-ap-channel", "AP Channel", UIFieldType.TEXT), "ESPNOW")
+    rhapi.fields.register_option(
+        UIField("espnow-address", "Device", UIFieldType.TEXT, desc="Serial device address"), "ESPNOW")
+    rhapi.fields.register_option(
+        UIField("espnow-baud", "Baudrate", UIFieldType.TEXT, desc="Serial device baudrate", placeholder=921600), "ESPNOW")
+    rhapi.fields.register_option(
+        UIField("espnow-race-director-mac", "RD MAC", UIFieldType.TEXT, desc="Race Director's MAC address for remote control"), "ESPNOW")
+    rhapi.events.on(Evt.VRX_INITIALIZE, register_handlers)
+    global RHAPI
+    RHAPI = rhapi
 
 def _logd(dbg: str):
     logger.debug(f"ESP-NOW: {dbg}")
@@ -77,27 +80,22 @@ class EspnowController(VRxController):
                             if _command == EspNowCommands.SUBCMD_LAP_TIMER_START:
                                 _logi("Laptimer start received!")
                                 if self._rhapi:
-                                    self._rhapi.race_stage()
+                                    self._rhapi.race.stage()
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_STOP:
                                 _logi("Laptimer stop received!")
                                 if self._rhapi:
                                     # TODO: save or not?
-                                    # self._rhapi.race_stop(doSave=True)
-                                    self._rhapi.race_stop(doSave=False)
+                                    # self._rhapi.race.stop(doSave=True)
+                                    self._rhapi.race.stop(doSave=False)
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_REGISTER:
                                 mac_addr = ':'.join(['%02X' % x for x in _payload[:6]])
                                 _payload = _payload[6:-1]
                                 callsign = "".join([chr(x) for x in _payload[:_payload.index(0)]])
                                 _logi(f"Laptimer register! Pilot: '{callsign}', address: {mac_addr}")
-                                all_pilots = self.racecontext.rhdata.get_pilots()
+                                all_pilots = self._rhapi.db.pilots
                                 for _pilot in all_pilots:
                                     if callsign in [_pilot.callsign, _pilot.name]:
-                                        alter_pilot = {
-                                            "pilot_id": _pilot.id,
-                                            "pilot_attr": "mac",
-                                            "value": mac_addr,
-                                        }
-                                        self.racecontext.rhdata.alter_pilot(alter_pilot)
+                                        self._rhapi.db.pilot_alter(_pilot.id, attributes={"mac", mac_addr})
                                         break
                             else:
                                 _logw(f"Laptimer command {_command} not handled!")
@@ -195,7 +193,6 @@ class EspnowController(VRxController):
         self.seat_frequencies = [node.frequency for node in self.racecontext.interface.nodes]
 
         baud = self.config.get('espnow_baudrate', 921600)
-        # baud = self.racecontext.rhdata.get_option('espnow_baudrate', baud)
         if conn_baud:
             baud = conn_baud
         try:
@@ -204,7 +201,6 @@ class EspnowController(VRxController):
             _loge(f"Unable to convert baudrate value '{baud}' to integer")
             return
         port = self.config.get('espnow_port', None)
-        # port = self.racecontext.rhdata.get_option('espnow_port', port)
         if conn_addr:
             port = conn_addr
         self.ser.baudrate = baud
@@ -233,22 +229,20 @@ class EspnowController(VRxController):
         self._sendMessage(msg)
         self.pilots_in_heat = []
 
-        race = self.racecontext.race
-        seat_pilots = race.node_pilots
-        rhdata = self.racecontext.rhdata
-        self.current_heat = current_heat = race.current_heat
+        seat_pilots = self._rhapi.race.pilots
+        self.current_heat = current_heat = self.rhapi.race.heat
         # heat = rhdata.get_heat(current_heat)
         _logd(f"seat_pilots: {seat_pilots} in heat {current_heat}")
         for seat_id, pilot_id in seat_pilots.items():
             if pilot_id:
                 freq = self.seat_frequencies[seat_id]
-                pilot = rhdata.get_pilot(pilot_id)
+                pilot = self._rhapi.db.pilot_by_id(pilot_id)
                 if not freq:
                     _loge(f"Not frequency for pilot {pilot} on seat {seat_id}... ignored")
                     # Invalid config!
                     continue
-                address = rhdata.get_pilot_attribute_value(pilot_id, 'mac')
-                round_num = rhdata.get_max_round(current_heat) or 0
+                address = self._rhapi.db.pilot_attribute_value(pilot_id, 'mac')
+                round_num = self.rhapi.db.heat_max_round(current_heat) or 0
                 if address:
                     _logd(f"  ! {pilot.callsign}, addr: {address}, "
                           f"heat: {current_heat}, round: {round_num}, freq: {freq}")
@@ -264,18 +258,17 @@ class EspnowController(VRxController):
         self._sendRaceStart()
         '''
         # Debug stuff:
-        seat_pilots = self.racecontext.race.node_pilots
-        rhdata = self.racecontext.rhdata
+        seat_pilots = self._rhapi.race.pilots
         for seat_id, pilot_id in seat_pilots.items():
             if pilot_id:
-                pilot = rhdata.get_pilot(pilot_id)
+                pilot = self._rhapi.db.pilot_by_id(pilot_id)
                 if pilot not in self.pilots_in_heat:
                     # Ignore pilot if not configured
                     continue
-                address = rhdata.get_pilot_attribute_value(pilot_id, 'mac')
+                address = self._rhapi.db.pilot_attribute_value(pilot_id, 'mac')
                 if address:
                     _logi(f"  ! {pilot.callsign}, addr: {address}")
-        '''
+        #'''
 
     def onRaceStart(self, _args):
         # logger.info(f"onRaceStart: _args {_args} ... RACE ON")
@@ -303,30 +296,18 @@ class EspnowController(VRxController):
             logger.error('Failed to send results: Seat not specified')
             return False
 
-        current_heat = self.racecontext.race.current_heat
-        round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
+        current_heat = self.rhapi.race.heat
+        round_num = self.rhapi.db.heat_max_round(current_heat) or 0
 
         node_index = args['node_index']
         lap = args['lap']
         lap_number = lap['lap_number']
         lap_time_ms = int(lap['lap_time'] + 0.5)
-        # round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
 
         _logd(f"LAP! node {node_index}, lap {lap_number}, time {lap_time_ms}")
 
         msg = EspNowCommands.msg_laptime(lap_time_ms, lap_number, current_heat, (node_index + 1), round_num)
         self._sendMessage(msg)
-        """
-        # Get relevant results
-        if 'gap_info' in args:
-            info = args['gap_info']
-        else:
-            info = Results.get_gap_info(self.racecontext, node_index)
-        # send message to crosser
-        address = self.racecontext.rhdata.get_pilot_attribute_value(info.current.pilot_id, 'mac')
-        if address:
-            _logi(f"  ... send to address: {address}")
-        """
 
     def onLapsClear(self, _args):
         # logger.info(f"onLapsClear: _args {_args}")
@@ -339,14 +320,14 @@ class EspnowController(VRxController):
             return
 
     def _sendRaceStart(self):
-        current_heat = self.racecontext.race.current_heat
-        round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
+        current_heat = self.rhapi.race.heat
+        round_num = self.rhapi.db.heat_max_round(current_heat) or 0
         msg = EspNowCommands.msg_start(current_heat, 0xff, round_num)
         self._sendMessage(msg)
 
     def _sendRaceStop(self):
-        current_heat = self.racecontext.race.current_heat
-        round_num = self.racecontext.rhdata.get_max_round(current_heat) or 0
+        current_heat = self.rhapi.race.heat
+        round_num = self.rhapi.db.heat_max_round(current_heat) or 0
         msg = EspNowCommands.msg_stop(current_heat, 0xff, round_num)
         self._sendMessage(msg)
 
