@@ -95,7 +95,9 @@ class EspnowController(VRxController):
                                 all_pilots = self._rhapi.db.pilots
                                 for _pilot in all_pilots:
                                     if callsign in [_pilot.callsign, _pilot.name]:
-                                        self._rhapi.db.pilot_alter(_pilot.id, attributes={"mac", mac_addr})
+                                        attr = dict()
+                                        attr["mac"] = mac_addr
+                                        self._rhapi.db.pilot_alter(_pilot.id, attributes=attr)
                                         break
                             else:
                                 _logw(f"Laptimer command {_command} not handled!")
