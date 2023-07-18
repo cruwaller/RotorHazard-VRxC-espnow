@@ -4,35 +4,12 @@ import serial
 import serial.tools.list_ports
 from struct import pack, unpack
 from VRxControl import VRxController, VRxDevice, VRxDeviceMethod
-from RHUI import UIField, UIFieldType
-import Config
+from RHUI import UIField, UIFieldType, UIFieldSelectOption
 import threading
 from eventmanager import Evt
 
 logger = logging.getLogger(__name__)
-RHAPI = None
 
-
-def register_handlers(args):
-    global RHAPI
-    args['register_fn'](EspnowController('espnow', 'ESPNOW', RHAPI))
-
-def initialize(rhapi):
-    rhapi.fields.register_pilot_attribute(UIField("mac", "ESPNOW MAC Address", UIFieldType.TEXT))
-    rhapi.ui.register_panel("ESPNOW", "ESPNOW Router Config", "settings")
-    rhapi.fields.register_option(
-        UIField("espnow-ap-ssid", "AP SSID", UIFieldType.TEXT), "ESPNOW")
-    rhapi.fields.register_option(
-        UIField("espnow-ap-channel", "AP Channel", UIFieldType.TEXT), "ESPNOW")
-    rhapi.fields.register_option(
-        UIField("espnow-address", "Device", UIFieldType.TEXT, desc="Serial device address"), "ESPNOW")
-    rhapi.fields.register_option(
-        UIField("espnow-baud", "Baudrate", UIFieldType.TEXT, desc="Serial device baudrate", placeholder=921600), "ESPNOW")
-    rhapi.fields.register_option(
-        UIField("espnow-race-director-mac", "RD MAC", UIFieldType.TEXT, desc="Race Director's MAC address for remote control"), "ESPNOW")
-    rhapi.events.on(Evt.VRX_INITIALIZE, register_handlers)
-    global RHAPI
-    RHAPI = rhapi
 
 def _logd(dbg: str):
     logger.debug(f"ESP-NOW: {dbg}")
@@ -47,16 +24,35 @@ def _loge(err: str):
     logger.error(f"ESP-NOW ERROR: {err}")
 
 
+def register_handlers(args):
+    args['register_fn'](EspnowController())
+
+
+def initialize(rhapi):
+    panel = "ESPNOW"
+    rhapi.fields.register_pilot_attribute(UIField("mac", "ESPNOW MAC Address", UIFieldType.TEXT))
+    rhapi.ui.register_panel(panel, "ESPNOW Router Config", "settings")
+    rhapi.fields.register_option(
+        UIField("espnow-ap-ssid", "AP SSID", UIFieldType.TEXT), panel)
+    rhapi.fields.register_option(
+        UIField("espnow-ap-channel", "AP Channel", UIFieldType.SELECT, options=[
+            UIFieldSelectOption(x+1, f"CH{x+1}") for x in range(13)]), panel)
+    rhapi.fields.register_option(
+        UIField("espnow-address", "Device", UIFieldType.TEXT, desc="Serial device address"), panel)
+    rhapi.fields.register_option(
+        UIField("espnow-baud", "Baudrate", UIFieldType.TEXT, desc="Serial device baudrate"), panel)
+    rhapi.fields.register_option(
+        UIField("espnow-race-director-mac", "RD MAC", UIFieldType.TEXT, desc="Race Director's MAC address for remote control",
+                placeholder="00:11:22:33:44:55"), panel)
+    args = {"rhapi": rhapi}
+    rhapi.events.on(Evt.VRX_INITIALIZE, register_handlers, args)
+
+
 class EspnowController(VRxController):
-    def __init__(self, name, label, api):
-        self.ser = serial.Serial()
+    def __init__(self):
+        self.ser = None  # serial.Serial()
         self.ready = False
-        self.config = {}
-        self.seat_frequencies = [0] * 8
-        self.current_heat = 0
-        self.pilots_in_heat = []
-        self._rhapi = api
-        super().__init__(name, label)
+        super().__init__('espnow', 'ESPNOW')
 
     def _handle_serial(self, ser: serial.Serial):
         _logd("== SERIAL READ ==")
@@ -79,25 +75,22 @@ class EspnowController(VRxController):
                             _payload = _payload[4:]
                             if _command == EspNowCommands.SUBCMD_LAP_TIMER_START:
                                 _logi("Laptimer start received!")
-                                if self._rhapi:
-                                    self._rhapi.race.stage()
+                                self.rhapi.race.stage()
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_STOP:
                                 _logi("Laptimer stop received!")
-                                if self._rhapi:
-                                    # TODO: save or not?
-                                    # self._rhapi.race.stop(doSave=True)
-                                    self._rhapi.race.stop(doSave=False)
+                                self.rhapi.race.stop(doSave=True)  # TODO: save or not?
                             elif _command == EspNowCommands.SUBCMD_LAP_TIMER_REGISTER:
                                 mac_addr = ':'.join(['%02X' % x for x in _payload[:6]])
                                 _payload = _payload[6:-1]
                                 callsign = "".join([chr(x) for x in _payload[:_payload.index(0)]])
                                 _logi(f"Laptimer register! Pilot: '{callsign}', address: {mac_addr}")
-                                all_pilots = self._rhapi.db.pilots
+                                _db = self.rhapi.db
+                                all_pilots = _db.pilots
                                 for _pilot in all_pilots:
                                     if callsign in [_pilot.callsign, _pilot.name]:
                                         attr = dict()
                                         attr["mac"] = mac_addr
-                                        self._rhapi.db.pilot_alter(_pilot.id, attributes=attr)
+                                        _db.pilot_alter(_pilot.id, attributes=attr)
                                         break
                             else:
                                 _logw(f"Laptimer command {_command} not handled!")
@@ -112,26 +105,27 @@ class EspnowController(VRxController):
         except serial.serialutil.SerialException as error:
             _loge(f"Serial connection exception: '{error}' -> exit loop")
 
-    def _test_port(self, port: str) -> bool:
-        if port:
-            self.ser.port = port
-            return self._check_device()
+    def _test_port(self, ser: serial.Serial) -> bool:
+        if ser and ser.port:
+            return self._check_device(ser)
         return False
 
-    def _discoverPort(self):
+    def _discoverPort(self, ser: serial.Serial) -> bool:
         # Automatic port discovery for ESP-NOW device
-        _logd("Finding a serial port...")
-        self.ser.timeout = 1
+        _logd("Auto discover a device...")
+        ser.timeout = 1
         ports = list(serial.tools.list_ports.comports())
         for p in ports:
             try:
-                if self._test_port(p.device):
-                    return
+                ser.port = p.device
+                if self._test_port(ser):
+                    return True
             except serial.serialutil.SerialException:
                 pass
             _logd(f"No module at {p.device}")
-            self.ser.close()
-        _logw("No module discovered or configured")
+            ser.close()
+        _logd("No module discovered")
+        return False
 
     def _create_device(self, name, state=False, mac=None):
         device = VRxDevice()
@@ -145,28 +139,27 @@ class EspnowController(VRxController):
         device.map.method = VRxDeviceMethod.ALL
         self.addDevice(device)
 
-    def _check_device(self) -> bool:
-        _logi(f" Trying dev {self.ser.port} baud: {self.ser.baudrate}")
+    def _check_device(self, ser: serial.Serial) -> bool:
+        _logi(f" Trying dev {ser.port} baud: {ser.baudrate}")
         ping = EspNowCommands.msg_ping()
         try:
-            self.ser.open()
+            ser.open()
             # time.sleep(2)
-            self.ser.reset_input_buffer()
-            self.ser.write(ping)
-            self.ser.flush()
-            msp = EspNowCommands.msp_receive(self.ser, 2)
+            ser.reset_input_buffer()
+            ser.write(ping)
+            ser.flush()
+            msp = EspNowCommands.msp_receive(ser, 2)
             if msp and msp.func == EspNowCommands.FUNC_ROUTER:
                 ping_payload = msp.get_msg()
                 if EspNowCommands.get_subcommand(ping_payload) == EspNowCommands.SUBCMD_ROUTER_PING:
                     mac_addr = ':'.join([hex(x) for x in ping_payload[4:]])
                     # _logi(f"ping resp: {[hex(x) for x in ping_payload]}")
-                    _logi(f"Module Found at {self.ser.port}")
-                    _logi(f"Module MAC address {mac_addr}")
+                    _logi(f"Module Found at {ser.port}! MAC address: {mac_addr}")
                     self.ready = True
 
-                    self._create_device(self.ser.port, True, mac_addr)
+                    self._create_device(ser.port, True, mac_addr)
 
-                    thread = threading.Thread(target=self._handle_serial, args=(self.ser,))
+                    thread = threading.Thread(target=self._handle_serial, args=(ser,))
                     thread.daemon = True
                     thread.start()
                     return True
@@ -175,46 +168,44 @@ class EspnowController(VRxController):
         return False
 
     def onStartup(self, _args):
-        rhdata = self.racecontext.rhdata
-        ap_ssid = rhdata.get_option("espnow-ap-ssid", "")
-        ap_channel = rhdata.get_option("espnow-ap-channel", "")
-        conn_addr = rhdata.get_option("espnow-address", "")
-        conn_baud = rhdata.get_option("espnow-baud", "")
-        if not ap_ssid:
-            ap_ssid = "RotorHazard ESP-NOW Router"
-            rhdata.set_option("espnow-ap-ssid", ap_ssid)
-        if not ap_channel:
-            ap_channel = "6"
-            rhdata.set_option("espnow-ap-channel", ap_channel)
-        _logi(f"********* WIFI AP:'{ap_ssid}', CH:{ap_channel}")
-        _logi(f"********* SERIAL addr:{conn_addr}, baud:{conn_baud}")
+        _db = self.rhapi.db
 
-        # Fetch config.json
-        self.config = Config.VRX_CONTROL
-        # Fetch used node freq
-        self.seat_frequencies = [node.frequency for node in self.racecontext.interface.nodes]
+        # Init default values:
+        options = [
+            {"name": "espnow-ap-ssid", "default": "RotorHazard ESP-NOW Router"},
+            {"name": "espnow-ap-channel", "default": 6},
+            {"name": "espnow-address", "default": ""},
+            {"name": "espnow-baud", "default": 921600},
+        ]
+        for opt in options:
+            if _db.option(opt["name"], None) is None:
+                _db.option_set(opt["name"], opt["default"])
+                pass
 
-        baud = self.config.get('espnow_baudrate', 921600)
-        if conn_baud:
-            baud = conn_baud
-        try:
-            baud = int(baud)
-        except (ValueError, TypeError):
-            _loge(f"Unable to convert baudrate value '{baud}' to integer")
+        ap_ssid = _db.option("espnow-ap-ssid")
+        ap_channel = _db.option("espnow-ap-channel", as_int=True)
+        port = _db.option("espnow-address")
+        baud = _db.option("espnow-baud", as_int=True)
+        rd_mac = _db.option("espnow-race-director-mac", default="")
+        _logi(f"********* WIFI AP: '{ap_ssid}', CH: {ap_channel}")
+        _logi(f"********* SERIAL addr: '{port}', baud: {baud}")
+        _logi(f"********* RD's MAC: '{rd_mac}'")
+
+        ser = serial.Serial()
+        ser.baudrate = baud
+        ser.port = port
+        if not self._test_port(ser):
+            if not self._discoverPort(ser):
+                _loge("No valid module found! ESP-NOW control disabled!")
+                return
+        if not ser or not ser.isOpen():
+            _loge("Invalid serial connection - disabled!")
             return
-        port = self.config.get('espnow_port', None)
-        if conn_addr:
-            port = conn_addr
-        self.ser.baudrate = baud
-        if not self._test_port(port):
-            self._discoverPort()
-        if self.ser.isOpen():
-            # Connection ok, setup AP
-            self._sendMessage(EspNowCommands.msg_router_set_ssid(ap_ssid, ap_channel))
-            rd_mac = rhdata.get_option("espnow-race-director-mac", "")
-            if rd_mac:
-                _logi(f"********* RD's MAC: {rd_mac}")
-                self._sendMessage(EspNowCommands.msg_router_set_rd(rd_mac))
+        self.ser = ser
+        # Connection ok, setup AP
+        self._sendMessage(EspNowCommands.msg_router_set_ssid(ap_ssid, ap_channel))
+        if rd_mac:
+            self._sendMessage(EspNowCommands.msg_router_set_rd(rd_mac))
         # Make sure the initially loaded heat is also taken into account
         self.onHeatSet({})
 
@@ -223,79 +214,63 @@ class EspnowController(VRxController):
         This function is called when new heat is selected.
         Send pilots info to ESP-NOW sender and prepare ESP-NOW peers.
         """
-        # logger.info(f"onHeatSet: _args {_args}")
         if not self.ready:
             return
         # Remove all existing peers
         msg = EspNowCommands.msg_router_reset()
         self._sendMessage(msg)
-        self.pilots_in_heat = []
 
-        seat_pilots = self._rhapi.race.pilots
-        self.current_heat = current_heat = self.rhapi.race.heat
+        _rhapi = self.rhapi
+        seat_pilots = _rhapi.race.pilots
+        current_heat = _rhapi.race.heat
         # heat = rhdata.get_heat(current_heat)
         _logd(f"seat_pilots: {seat_pilots} in heat {current_heat}")
+        # Fetch used node freq
+        _seat_frequencies = [node.frequency for node in self.racecontext.interface.nodes]
         for seat_id, pilot_id in seat_pilots.items():
             if pilot_id:
-                freq = self.seat_frequencies[seat_id]
-                pilot = self._rhapi.db.pilot_by_id(pilot_id)
+                freq = _seat_frequencies[seat_id]
+                pilot = _rhapi.db.pilot_by_id(pilot_id)
                 if not freq:
                     _loge(f"Not frequency for pilot {pilot} on seat {seat_id}... ignored")
                     # Invalid config!
                     continue
-                address = self._rhapi.db.pilot_attribute_value(pilot_id, 'mac')
-                round_num = self.rhapi.db.heat_max_round(current_heat) or 0
+                address = _rhapi.db.pilot_attribute_value(pilot_id, 'mac')
+                round_num = _rhapi.db.heat_max_round(current_heat) or 0
                 if address:
                     _logd(f"  ! {pilot.callsign}, addr: {address}, "
                           f"heat: {current_heat}, round: {round_num}, freq: {freq}")
                     # Add peer
                     msg = EspNowCommands.msg_router_peer_add(address, seat_id, current_heat, freq)
                     self._sendMessage(msg)
-                    self.pilots_in_heat.append(pilot)
 
     def onRaceStage(self, _args):
-        # logger.info(f"onRaceStage: _args {_args} ... ARM NOW (race is about to start)")
+        # ... ARM NOW (race is about to start)")
         if not self.ready:
             return
         self._sendRaceStart()
-        '''
-        # Debug stuff:
-        seat_pilots = self._rhapi.race.pilots
-        for seat_id, pilot_id in seat_pilots.items():
-            if pilot_id:
-                pilot = self._rhapi.db.pilot_by_id(pilot_id)
-                if pilot not in self.pilots_in_heat:
-                    # Ignore pilot if not configured
-                    continue
-                address = self._rhapi.db.pilot_attribute_value(pilot_id, 'mac')
-                if address:
-                    _logi(f"  ! {pilot.callsign}, addr: {address}")
-        #'''
 
     def onRaceStart(self, _args):
-        # logger.info(f"onRaceStart: _args {_args} ... RACE ON")
+        # ... RACE ON")
         if not self.ready:
             return
         self._sendRaceStart()
 
     def onRaceFinish(self, _args):
-        # logger.info(f"onRaceFinish: _args {_args}")
         if not self.ready:
             return
         self._sendRaceStop()
 
     def onRaceStop(self, _args):
-        # logger.info(f"onRaceStop: _args {_args}")
         if not self.ready:
             return
         self._sendRaceStop()
 
     def onRaceLapRecorded(self, args):
-        # logger.info(f"onRaceLapRecorded: _args {args}")
         if not self.ready:
             return
         if 'node_index' not in args:
-            logger.error('Failed to send results: Seat not specified')
+            _loge('Failed to send results: Seat not specified')
             return False
 
         current_heat = self.rhapi.race.heat
@@ -312,14 +287,10 @@ class EspnowController(VRxController):
         self._sendMessage(msg)
 
     def onLapsClear(self, _args):
-        # logger.info(f"onLapsClear: _args {_args}")
-        if not self.ready:
-            return
+        pass
 
     def onSendMessage(self, args):
-        # logger.info(f"onSendMessage: _args {args}")
-        if not self.ready:
-            return
+        pass
 
     def _sendRaceStart(self):
         current_heat = self.rhapi.race.heat
@@ -334,6 +305,8 @@ class EspnowController(VRxController):
         self._sendMessage(msg)
 
     def _sendMessage(self, payload):
+        if not self.ser:
+            return
         try:
             if not self.ser.isOpen():
                 self.ser.open()
