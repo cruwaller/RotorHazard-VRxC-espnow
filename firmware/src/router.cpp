@@ -9,6 +9,7 @@
 #endif
 
 //#define DEBUG_PRINT 1
+#define ESP32_RATE_CHANGE_EN 0
 
 #define SERIAL_BAUD 921600
 #define SERIAL_INVERTED false
@@ -77,7 +78,7 @@ static bool add_peer(uint8_t const * const mac_addr, uint32_t const channel, uin
             .peer_addr = {0},
             .lmk = {0},
             .channel = (uint8_t)channel,
-            .ifidx = ESP_IF_WIFI_AP,
+            .ifidx = WIFI_IF_AP,
             .encrypt = false,
             .priv = NULL};
         memcpy(peer_info.peer_addr, mac_addr, sizeof(peer_info.peer_addr));
@@ -275,6 +276,15 @@ void wifi_ap_config(const char * ssid, uint8_t const channel)
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(ssid, WIFI_AP_PSK, channel);
+
+#if defined(ARDUINO_ARCH_ESP32) && ESP32_RATE_CHANGE_EN
+    //  WIFI_PHY_RATE_LORA_250K = 0x29, /**< 250 Kbps */
+    //  WIFI_PHY_RATE_LORA_500K = 0x2A, /**< 500 Kbps */
+    if (ESP_OK != esp_wifi_config_espnow_rate(WIFI_IF_AP, WIFI_PHY_RATE_1M_L))
+    {
+        Serial.println("WiFi espnow rate config failed!");
+    }
+#endif
 
     wifi_channel = channel;
 
